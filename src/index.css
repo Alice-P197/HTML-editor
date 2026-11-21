@@ -1,0 +1,71 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./tailwind-theme.css";
+@import "./typography.css";
+
+/* 源码语法高亮配色（随主题切换） */
+.hljs {
+  color: var(--foreground);
+  background: transparent;
+}
+.hljs-comment,
+.hljs-meta,
+.hljs-doctag {
+  color: var(--hl-comment);
+  font-style: italic;
+}
+.hljs-tag {
+  color: var(--hl-tag);
+}
+.hljs-name,
+.hljs-title {
+  color: var(--hl-name);
+  font-weight: 600;
+}
+.hljs-attr,
+.hljs-selector-tag,
+.hljs-property,
+.hljs-variable {
+  color: var(--hl-attr);
+}
+.hljs-string,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-regexp {
+  color: var(--hl-string);
+}
+.hljs-keyword,
+.hljs-selector-pseudo,
+.hljs-built_in,
+.hljs-literal,
+.hljs-number {
+  color: var(--hl-keyword);
+}
+.hljs-bullet,
+.hljs-symbol,
+.hljs-quote {
+  color: var(--hl-bullet);
+}
+
+/* 全局滚动条美化：细、圆角、半透明，贴合毛玻璃主题 */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
