@@ -18,6 +18,10 @@ if (app.isPackaged) {
 
 let mainWindow = null;
 let splashWindow = null;
+let mainReady = false;
+let splashStart = 0;
+// 启动画面最短展示时长，避免本地加载过快导致 splash 一闪而过
+const MIN_SPLASH_MS = 1400;
 
 /** 关闭启动画面（幂等） */
 function closeSplash() {
@@ -25,13 +29,28 @@ function closeSplash() {
   splashWindow = null;
 }
 
-/** 启动画面：无边框透明小窗，主窗口就绪后自动关闭 */
+/** 主窗就绪且 splash 展示满最短时长后，再显示主窗并关闭 splash */
+function maybeShowMain() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainReady) return;
+  const elapsed = Date.now() - splashStart;
+  if (elapsed < MIN_SPLASH_MS) {
+    setTimeout(maybeShowMain, MIN_SPLASH_MS - elapsed);
+    return;
+  }
+  mainWindow.show();
+  closeSplash();
+}
+
+/** 启动画面：无边框小窗，主窗口就绪且展示满最短时长后关闭 */
 function createSplash() {
+  splashStart = Date.now();
   splashWindow = new BrowserWindow({
     width: 440,
     height: 280,
     frame: false,
     transparent: true,
+    backgroundColor: '#0f172a',
     resizable: false,
     movable: true,
     center: true,
@@ -71,8 +90,8 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    closeSplash();
+    mainReady = true;
+    maybeShowMain();
   });
 
   if (app.isPackaged) {

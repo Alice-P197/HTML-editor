@@ -25,6 +25,7 @@ ShowUninstDetails hide
 !insertmacro MUI_UNPAGE_INSTFILES
 
 Section "主程序" SecCore
+  RMDir /r "$INSTDIR"
   SetOutPath "$INSTDIR"
   File /r "release\win-unpacked\*.*"
   WriteRegStr HKCU "Software\HtmlEditor" "InstallDir" "$INSTDIR"

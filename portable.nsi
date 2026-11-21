@@ -6,7 +6,7 @@ OutFile "release\HtmlEditor-Desktop.exe"
 RequestExecutionLevel user
 InstallDir "$EXEDIR\HtmlEditor"
 Icon "assets\icon.ico"
-SetCompressor /SOLID zlib
+SetCompressor /SOLID lzma
 SetOverwrite on
 SilentInstall silent
 
