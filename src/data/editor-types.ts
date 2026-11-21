@@ -8,6 +8,22 @@ export interface IEditorDoc {
   source: string;
 }
 
+/** 多标签页中的一个编辑文档 */
+export interface IEditorTab {
+  /** 稳定标识（会话内唯一） */
+  id: string;
+  /** 文件名（含扩展名） */
+  fileName: string;
+  /** 完整 HTML 源码 */
+  source: string;
+  /** 已持有的文件句柄（新建 / 另存前为 null） */
+  handle: IFileHandle | null;
+  /** 相对已保存版本是否有未保存修改 */
+  dirty: boolean;
+  /** 上次保存时的源码（用于 dirty 判定） */
+  savedSource: string;
+}
+
 /** File System Access API 的 WritableStream 最小接口 */
 export interface IWritable {
   write(data: string): Promise<void>;

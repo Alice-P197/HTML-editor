@@ -1,6 +1,17 @@
-import { useEffect, useDeferredValue, useMemo, useRef, type ChangeEvent, type KeyboardEvent, type WheelEvent } from 'react';
-import hljs from 'highlight.js';
-import { cursorPosition } from '@/lib/html-editor';
+import { useEffect, useRef } from 'react';
+import { EditorState, type Extension } from '@codemirror/state';
+import {
+  EditorView,
+  keymap,
+  lineNumbers,
+  highlightActiveLine,
+  drawSelection,
+  type ViewUpdate,
+} from '@codemirror/view';
+import { defaultKeymap, history, indentWithTab } from '@codemirror/commands';
+import { html } from '@codemirror/lang-html';
+import { HighlightStyle, syntaxHighlighting, bracketMatching } from '@codemirror/language';
+import { tags as t } from '@lezer/highlight';
 import type { IEditorCursor } from '../use-editor';
 
 interface CodePaneProps {
@@ -9,139 +20,116 @@ interface CodePaneProps {
   onCursorChange: (c: IEditorCursor) => void;
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+/** 语法高亮配色，复用全局主题变量，随五套主题切换 */
+const highlightStyle = HighlightStyle.define([
+  { tag: t.comment, color: 'var(--hl-comment)', fontStyle: 'italic' },
+  { tag: t.tagName, color: 'var(--hl-tag)', fontWeight: '600' },
+  { tag: t.attributeName, color: 'var(--hl-attr)' },
+  { tag: t.attributeValue, color: 'var(--hl-string)' },
+  { tag: t.string, color: 'var(--hl-string)' },
+  { tag: t.keyword, color: 'var(--hl-keyword)' },
+  { tag: t.propertyName, color: 'var(--hl-attr)' },
+  { tag: t.className, color: 'var(--hl-string)' },
+  { tag: t.literal, color: 'var(--hl-keyword)' },
+  { tag: t.number, color: 'var(--hl-keyword)' },
+]);
 
-/** 左侧源码编辑区：行号 + 语法高亮，透明 textarea 覆盖其上保证原生编辑体验；长行自动折行不超出边界 */
+const editorTheme = EditorView.theme({
+  '&': {
+    backgroundColor: 'transparent',
+    color: 'var(--foreground)',
+    height: '100%',
+    fontSize: '13px',
+  },
+  '.cm-scroller': {
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    lineHeight: '1.75',
+  },
+  '.cm-content': {
+    padding: '12px 12px 48px',
+    caretColor: 'var(--primary)',
+  },
+  '.cm-gutters': {
+    backgroundColor: 'transparent',
+    color: 'var(--muted-foreground)',
+    border: 'none',
+    paddingRight: '10px',
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+  },
+  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--muted) 60%, transparent)' },
+  '.cm-activeLineGutter': { color: 'var(--foreground)' },
+  '&.cm-focused': { outline: 'none' },
+  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
+    backgroundColor: 'color-mix(in srgb, var(--primary) 18%, transparent)',
+  },
+});
+
+/** 左侧源码编辑区：CodeMirror 6 内核，行号 / HTML 高亮 / 括号匹配 / 撤销重做 / Tab 缩进 */
 export default function CodePane({ value, onChange, onCursorChange }: CodePaneProps) {
-  const ref = useRef<HTMLTextAreaElement>(null);
-  const preRef = useRef<HTMLPreElement>(null);
-  const gutterRef = useRef<HTMLDivElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const selectionRef = useRef<{ start: number; end: number } | null>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+  const onChangeRef = useRef(onChange);
+  const onCursorRef = useRef(onCursorChange);
+  onChangeRef.current = onChange;
+  onCursorRef.current = onCursorChange;
 
-  // 输入走实时 value；语法高亮与行号用延迟值追赶，避免每键全量解析阻塞打字
-  const deferredValue = useDeferredValue(value);
-
-  const highlighted = useMemo(() => {
-    try {
-      return hljs.highlight(deferredValue, { language: 'xml' }).value;
-    } catch {
-      return escapeHtml(deferredValue);
-    }
-  }, [deferredValue]);
-
-  const lineNumbers = useMemo(() => {
-    const count = Math.max(1, deferredValue.split('\n').length);
-    return Array.from({ length: count }, (_, i) => i + 1);
-  }, [deferredValue]);
-
-  // 受控 textarea 在值更新后会丢失光标，这里在渲染后恢复
+  // 编辑器只挂载一次；后续外部值变化走下面的同步 effect
   useEffect(() => {
-    const sel = selectionRef.current;
-    const el = ref.current;
-    if (sel && el && document.activeElement === el) {
-      el.setSelectionRange(sel.start, sel.end);
-      selectionRef.current = null;
+    const host = hostRef.current;
+    if (!host) return;
+
+    const reportCursor = (update: ViewUpdate) => {
+      const pos = update.state.selection.main.head;
+      const before = update.state.doc.sliceString(0, pos);
+      const lines = before.split('\n');
+      onCursorRef.current({ line: lines.length, col: lines[lines.length - 1].length + 1 });
+    };
+
+    const extensions: Extension = [
+      lineNumbers(),
+      history(),
+      drawSelection(),
+      keymap.of([...defaultKeymap, indentWithTab]),
+      bracketMatching(),
+      html(),
+      syntaxHighlighting(highlightStyle),
+      highlightActiveLine(),
+      editorTheme,
+      EditorView.updateListener.of((update) => {
+        if (update.docChanged) onChangeRef.current(update.state.doc.toString());
+        if (update.selectionSet || update.docChanged) reportCursor(update);
+      }),
+    ];
+
+    const state = EditorState.create({ doc: value, extensions });
+    const view = new EditorView({ state, parent: host });
+    viewRef.current = view;
+
+    return () => {
+      view.destroy();
+      viewRef.current = null;
+    };
+    // 仅以首次传入值初始化；value 同步由专门 effect 负责
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 外部值变化（切换标签 / 打开文件 / WYSIWYG 回写）时同步进编辑器，避免打断当前输入
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current !== value) {
+      view.dispatch({ changes: { from: 0, to: current.length, insert: value } });
     }
   }, [value]);
-
-  // 透明 textarea 高度跟随内容，与高亮层 pre 对齐；垂直滚动统一由外层容器承担
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
-  }, [deferredValue]);
-
-  /** 外层滚动容器滚动时同步行号列与 textarea 内部位置（高亮层随容器自然滚动） */
-  const syncScroll = () => {
-    const sc = scrollRef.current;
-    if (!sc) return;
-    if (gutterRef.current) gutterRef.current.scrollTop = sc.scrollTop;
-    if (ref.current) ref.current.scrollTop = sc.scrollTop;
-  };
-
-  /** 滚轮落在 textarea 上时转发给外层可滚动容器，避免被表单控件吞掉导致无法上下滚动 */
-  const handleWheel = (e: WheelEvent<HTMLTextAreaElement>) => {
-    const sc = scrollRef.current;
-    if (!sc) return;
-    e.preventDefault();
-    sc.scrollTop += e.deltaY;
-  };
-
-  const reportCursor = () => {
-    const el = ref.current;
-    if (!el) return;
-    const pos = cursorPosition(el);
-    onCursorChange({ line: pos.line, col: pos.col });
-  };
-
-  const handleChange = (e: ChangeEvent<HTMLTextAreaElement>) => {
-    const el = e.currentTarget;
-    selectionRef.current = { start: el.selectionStart, end: el.selectionEnd };
-    onChange(el.value);
-  };
-
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key !== 'Tab') return;
-    e.preventDefault();
-    const el = e.currentTarget;
-    const start = el.selectionStart;
-    const end = el.selectionEnd;
-    if (e.shiftKey) {
-      const lineStart = value.lastIndexOf('\n', start - 1) + 1;
-      const indent = value.slice(lineStart, start);
-      const remove = indent.startsWith('  ') ? 2 : indent.startsWith(' ') ? 1 : 0;
-      if (remove > 0) {
-        onChange(value.slice(0, lineStart) + value.slice(lineStart + remove));
-        selectionRef.current = { start: Math.max(start - remove, lineStart), end: Math.max(start - remove, lineStart) };
-      }
-    } else {
-      onChange(value.slice(0, start) + '  ' + value.slice(end));
-      selectionRef.current = { start: start + 2, end: start + 2 };
-    }
-  };
 
   return (
     <div className="flex h-full min-w-0 flex-col bg-card/60 backdrop-blur-xl">
       <div className="flex items-center gap-2 border-b border-dashed px-3 py-1.5">
         <span className="font-mono text-[11px] font-semibold tracking-wide text-muted-foreground">源码 · HTML</span>
       </div>
-      <div className="flex min-h-0 flex-1">
-        <div
-          ref={gutterRef}
-          aria-hidden="true"
-          className="w-11 shrink-0 select-none overflow-hidden border-r border-dashed bg-muted/40 py-3 pr-2 text-right font-mono text-[13px] leading-relaxed text-muted-foreground"
-        >
-          {lineNumbers.map((n) => (
-            <div key={n}>{n}</div>
-          ))}
-        </div>
-        <div ref={scrollRef} onScroll={syncScroll} className="relative min-w-0 flex-1 overflow-auto">
-          <pre
-            ref={preRef}
-            aria-hidden="true"
-            className="m-0 whitespace-pre-wrap break-all p-3 font-mono text-[13px] leading-relaxed"
-            dangerouslySetInnerHTML={{ __html: highlighted }}
-          />
-          <textarea
-            ref={ref}
-            value={value}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            onWheel={handleWheel}
-            onSelect={reportCursor}
-            onClick={reportCursor}
-            onKeyUp={reportCursor}
-            spellCheck={false}
-            wrap="soft"
-            placeholder="在此输入 HTML 源码…"
-            aria-label="HTML 源码编辑器"
-            className="absolute inset-x-0 top-0 w-full resize-none overflow-hidden whitespace-pre-wrap break-all bg-transparent p-3 font-mono text-[13px] leading-relaxed text-transparent caret-primary outline-none placeholder:text-muted-foreground"
-          />
-        </div>
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <div ref={hostRef} className="h-full" />
       </div>
     </div>
   );

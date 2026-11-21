@@ -11,6 +11,7 @@ import PreviewPane from './sections/PreviewPane';
 import StatusBar from './sections/StatusBar';
 import Toolbar from './sections/Toolbar';
 import WorkspacePanel from './sections/WorkspacePanel';
+import TabsBar from './sections/TabsBar';
 
 /** 视口宽度 ≥1024px 时为桌面端（三栏横排），否则为窄屏（纵向堆叠） */
 function useIsDesktop(): boolean {
@@ -26,24 +27,31 @@ function useIsDesktop(): boolean {
   return isDesktop;
 }
 
-/** HTML 编辑器主页：工作区 + 源码 + 预览，三栏宽度可拖拽调整，支持多主题配色 */
+/** HTML 编辑器主页：工作区 + 源码 + 预览，三栏宽度可拖拽调整，支持多标签与多主题配色 */
 export default function EditorPage() {
   const editor = useEditor();
   const isDesktop = useIsDesktop();
+  const active = editor.activeTab;
 
   const workspacePanel = (
     <WorkspacePanel
       hasDirPicker={editor.hasPicker}
       workspaceDirName={editor.workspaceDir?.name ?? null}
       files={editor.workspaceFiles}
-      activeFile={editor.doc.fileName}
+      activeFile={active?.fileName ?? ''}
       onPickWorkspace={editor.handlePickWorkspace}
       onRefreshWorkspace={editor.handleRefreshWorkspace}
       onOpenFile={editor.handleOpenFromWorkspace}
     />
   );
 
-  const codePane = <CodePane value={editor.doc.source} onChange={editor.setSource} onCursorChange={editor.setCursor} />;
+  const codePane = (
+    <CodePane
+      value={active?.source ?? ''}
+      onChange={editor.setSource}
+      onCursorChange={editor.setCursor}
+    />
+  );
 
   const previewPane = (
     <PreviewPane
@@ -70,6 +78,12 @@ export default function EditorPage() {
           onOpen={editor.handleOpen}
           onSave={editor.handleSave}
           onSaveAs={editor.handleSaveAs}
+        />
+        <TabsBar
+          tabs={editor.tabs}
+          activeId={editor.activeId}
+          onSelect={editor.setActiveId}
+          onClose={editor.closeTab}
         />
         {isDesktop ? (
           <ResizablePanelGroup direction="horizontal" autoSaveId="html-editor:layout" className="min-h-0 flex-1">
@@ -101,7 +115,7 @@ export default function EditorPage() {
           </ResizablePanelGroup>
         )}
         <StatusBar
-          fileName={editor.doc.fileName}
+          fileName={active?.fileName ?? ''}
           dirty={editor.dirty}
           cursor={editor.cursor}
           isEditing={editor.isEditing}

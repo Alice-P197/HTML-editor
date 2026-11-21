@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import type { IDirectoryHandle, IEditorDoc, IFileHandle } from '@/data/editor-types';
+import type { IDirectoryHandle, IEditorTab, IFileHandle, IOpenResult } from '@/data/editor-types';
 import {
   DEFAULT_HTML,
   countStats,
-  draftStore,
   formatHtml,
   hasFilePickerSupport,
   listWorkspaceHtmlFiles,
@@ -18,7 +17,7 @@ import {
   saveWithHandle,
 } from '@/lib/html-editor';
 
-// EXPORTS: IEditorCursor{line,col}, IEditorStats{chars,lines}, IUseEditorReturn, useEditor
+// EXPORTS: IEditorCursor{line,col}, IEditorStats{chars,lines}, useEditor
 
 export interface IEditorCursor {
   line: number;
@@ -30,104 +29,114 @@ export interface IEditorStats {
   lines: number;
 }
 
-export interface IUseEditorReturn {
-  doc: IEditorDoc;
-  setSource: (v: string) => void;
-  dirty: boolean;
-  isEditing: boolean;
-  setEditing: (v: boolean) => void;
-  previewStale: boolean;
-  refreshPreview: () => void;
-  renderedHtml: string;
-  cursor: IEditorCursor;
-  setCursor: (c: IEditorCursor) => void;
-  handleWysiwygChange: (bodyInner: string) => void;
-  handleNew: () => void;
-  handleOpen: () => void;
-  handleSave: () => void;
-  handleSaveAs: () => void;
-  stats: IEditorStats;
-  workspaceDir: IDirectoryHandle | null;
-  workspaceFiles: string[];
-  handlePickWorkspace: () => void;
-  handleRefreshWorkspace: () => void;
-  handleOpenFromWorkspace: (name: string) => void;
-  hasPicker: boolean;
+const DRAFT_KEY = 'html-editor:tabs-draft';
+const LEGACY_DRAFT_KEY = 'html-editor:draft';
+
+let seq = 0;
+const nextId = () => `tab-${Date.now().toString(36)}-${seq++}`;
+
+function makeTab(fileName: string, source: string, handle: IFileHandle | null, savedSource?: string): IEditorTab {
+  const saved = savedSource ?? source;
+  return { id: nextId(), fileName, source, handle, dirty: source !== saved, savedSource: saved };
 }
 
-const INITIAL_DOC: IEditorDoc = { fileName: '未命名.html', source: DEFAULT_HTML };
+/** 读取多标签草稿；兼容旧版单文档草稿 */
+function restoreTabs(): IEditorTab[] {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { tabs?: { fileName: string; source: string }[] };
+      if (Array.isArray(parsed.tabs) && parsed.tabs.length > 0) {
+        return parsed.tabs
+          .filter((t) => typeof t.source === 'string')
+          .map((t) => makeTab(t.fileName || '未命名.html', formatHtml(t.source), null));
+      }
+    }
+    const legacy = localStorage.getItem(LEGACY_DRAFT_KEY);
+    if (legacy) {
+      const parsed = JSON.parse(legacy) as { fileName?: string; source?: string };
+      if (typeof parsed.source === 'string' && parsed.source.trim()) {
+        return [makeTab(parsed.fileName || '未命名.html', formatHtml(parsed.source), null)];
+      }
+    }
+  } catch {
+    /* 草稿损坏时回落到默认文档 */
+  }
+  return [makeTab('未命名.html', DEFAULT_HTML, null)];
+}
 
-/** 挂载前读取一次未保存草稿，作为初始文档（自动格式化排版） */
-const initialDoc: IEditorDoc = (() => {
-  const draft = draftStore.get();
-  return draft ? { ...draft, source: formatHtml(draft.source) } : INITIAL_DOC;
-})();
-
-/** 编辑器文档的核心状态与打开 / 保存 / 双向同步逻辑 */
-export function useEditor(): IUseEditorReturn {
-  const [doc, setDoc] = useState<IEditorDoc>(initialDoc);
-  const [dirty, setDirty] = useState(() => initialDoc.source !== INITIAL_DOC.source);
+/** 编辑器核心状态：多标签文档、打开 / 保存 / 双向同步逻辑 */
+export function useEditor() {
+  const [tabs, setTabs] = useState<IEditorTab[]>(restoreTabs);
+  const [activeId, setActiveId] = useState<string>(() => tabs[0]?.id ?? '');
   const [isEditing, setIsEditing] = useState(true);
-  const [previewStale, setPreviewStale] = useState(false);
-  const [renderedHtml, setRenderedHtml] = useState(initialDoc.source);
   const [cursor, setCursor] = useState<IEditorCursor>({ line: 1, col: 1 });
-  const [fileHandle, setFileHandle] = useState<IFileHandle | null>(null);
   const [workspaceDir, setWorkspaceDir] = useState<IDirectoryHandle | null>(null);
   const [workspaceFiles, setWorkspaceFiles] = useState<string[]>([]);
 
-  const sourceRef = useRef(initialDoc.source);
-  const savedSourceRef = useRef(initialDoc.source);
+  // 每个标签最近一次已刷新到预览的源码；未命中时预览跟随当前源码
+  const [previewMap, setPreviewMap] = useState<Record<string, string>>({});
+  const [staleMap, setStaleMap] = useState<Record<string, boolean>>({});
+
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const activeRef = useRef(activeId);
+  activeRef.current = activeId;
   const wysiwygUpdating = useRef(false);
-  const previewStaleRef = useRef(false);
   const debounceRef = useRef<number | undefined>(undefined);
   const draftTimerRef = useRef<number | undefined>(undefined);
 
-  const markPreviewStale = useCallback(() => {
-    previewStaleRef.current = true;
-    setPreviewStale(true);
+  const activeTab = useMemo(
+    () => tabs.find((t) => t.id === activeId) ?? tabs[0],
+    [tabs, activeId],
+  );
+
+  const patchTab = useCallback((id: string, patch: Partial<IEditorTab>) => {
+    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   }, []);
 
-  const clearPreviewStale = useCallback(() => {
-    previewStaleRef.current = false;
-    setPreviewStale(false);
-  }, []);
-
-  /** 统一入口：源码被修改（手写或 WYSIWYG 回写） */
+  /** 统一入口：某标签源码被修改（手写或 WYSIWYG 回写） */
   const commitSource = useCallback(
-    (next: string) => {
-      sourceRef.current = next;
-      setDoc((prev) => ({ ...prev, source: next }));
-      setDirty(true);
+    (next: string, targetId?: string) => {
+      const id = targetId ?? activeRef.current;
+      if (!id) return;
+      const prev = tabsRef.current.find((t) => t.id === id);
+      if (!prev) return;
+      const dirty = next !== prev.savedSource;
+
       if (wysiwygUpdating.current) {
-        // WYSIWYG 回写：iframe 内就是最新内容，无需刷新
+        // WYSIWYG 回写：iframe 内就是最新内容，预览无需再刷
         wysiwygUpdating.current = false;
+        patchTab(id, { source: next, dirty });
         return;
       }
+
+      patchTab(id, { source: next, dirty });
+
       if (isEditing) {
         // 编辑模式下不打断正在编辑的画布，标记待刷新
-        markPreviewStale();
+        setStaleMap((m) => ({ ...m, [id]: true }));
         return;
       }
       window.clearTimeout(debounceRef.current);
       debounceRef.current = window.setTimeout(() => {
-        setRenderedHtml(next);
+        setPreviewMap((m) => ({ ...m, [id]: next }));
+        setStaleMap((m) => ({ ...m, [id]: false }));
       }, 350);
     },
-    [isEditing, markPreviewStale],
+    [isEditing, patchTab],
   );
 
-  const setSource = useCallback(
-    (v: string) => {
-      commitSource(v);
-    },
-    [commitSource],
-  );
+  const setSource = useCallback((v: string) => commitSource(v), [commitSource]);
 
-  /** 预览内像 Word 一样编辑后，把 body 内容合并回源码 */
+  /** 预览内像 Word 一样编辑后，把 body 内容合并回当前标签源码 */
   const handleWysiwygChange = useCallback(
     (bodyInner: string) => {
+      const id = activeRef.current;
+      const prev = tabsRef.current.find((t) => t.id === id);
+      if (!prev) return;
       wysiwygUpdating.current = true;
-      commitSource(mergeBodyInner(sourceRef.current, bodyInner));
+      commitSource(mergeBodyInner(prev.source, bodyInner), id);
     },
     [commitSource],
   );
@@ -137,44 +146,92 @@ export function useEditor(): IUseEditorReturn {
     (v: boolean) => {
       window.clearTimeout(debounceRef.current);
       setIsEditing(v);
+      const id = activeRef.current;
+      const prev = tabsRef.current.find((t) => t.id === id);
+      if (!prev) return;
       if (v) {
-        setRenderedHtml(sourceRef.current);
-        clearPreviewStale();
-      } else if (previewStaleRef.current) {
-        setRenderedHtml(sourceRef.current);
-        clearPreviewStale();
+        setPreviewMap((m) => ({ ...m, [id]: prev.source }));
+        setStaleMap((m) => ({ ...m, [id]: false }));
+      } else {
+        setPreviewMap((m) => ({ ...m, [id]: prev.source }));
+        setStaleMap((m) => ({ ...m, [id]: false }));
       }
     },
-    [clearPreviewStale],
+    [],
   );
 
-  /** 手动刷新预览 */
+  /** 手动刷新当前标签预览 */
   const refreshPreview = useCallback(() => {
     window.clearTimeout(debounceRef.current);
-    setRenderedHtml(sourceRef.current);
-    clearPreviewStale();
-  }, [clearPreviewStale]);
+    const id = activeRef.current;
+    const prev = tabsRef.current.find((t) => t.id === id);
+    if (!prev) return;
+    setPreviewMap((m) => ({ ...m, [id]: prev.source }));
+    setStaleMap((m) => ({ ...m, [id]: false }));
+  }, []);
 
-  /** 打开 / 新建后统一装载文档（自动完成格式化排版） */
-  const applyOpenedFile = useCallback(
+  /** 打开 / 新建后统一装载文档（自动格式化排版），已存在同文件则直接激活 */
+  const upsertOpened = useCallback(
     (source: string, fileName: string, handle: IFileHandle | null) => {
       const formatted = formatHtml(source);
-      window.clearTimeout(debounceRef.current);
-      setDoc({ fileName, source: formatted });
-      sourceRef.current = formatted;
-      savedSourceRef.current = formatted;
-      setFileHandle(handle);
-      setRenderedHtml(formatted);
-      clearPreviewStale();
-      wysiwygUpdating.current = false;
-      setDirty(false);
+      const key = handle?.path || fileName;
+      const existing = tabsRef.current.find((t) => (t.handle?.path || t.fileName) === key);
+      if (existing) {
+        setActiveId(existing.id);
+        setPreviewMap((m) => ({ ...m, [existing.id]: existing.source }));
+        setStaleMap((m) => ({ ...m, [existing.id]: false }));
+        return;
+      }
+      const tab = makeTab(fileName, formatted, handle);
+      setTabs((prev) => [...prev, tab]);
+      setActiveId(tab.id);
+      setPreviewMap((m) => ({ ...m, [tab.id]: formatted }));
+      setStaleMap((m) => ({ ...m, [tab.id]: false }));
     },
-    [clearPreviewStale],
+    [],
   );
 
   const handleNew = useCallback(() => {
-    applyOpenedFile(DEFAULT_HTML, '未命名.html', null);
-  }, [applyOpenedFile]);
+    const tab = makeTab('未命名.html', DEFAULT_HTML, null);
+    setTabs((prev) => [...prev, tab]);
+    setActiveId(tab.id);
+    setPreviewMap((m) => ({ ...m, [tab.id]: DEFAULT_HTML }));
+    setStaleMap((m) => ({ ...m, [tab.id]: false }));
+  }, []);
+
+  const activateTab = useCallback((id: string) => {
+    const prev = tabsRef.current.find((t) => t.id === id);
+    if (!prev) return;
+    setActiveId(id);
+    setPreviewMap((m) => ({ ...m, [id]: prev.source }));
+    setStaleMap((m) => ({ ...m, [id]: false }));
+  }, []);
+
+  const closeTab = useCallback(
+    (id: string) => {
+      const target = tabsRef.current.find((t) => t.id === id);
+      if (!target) return;
+      if (target.dirty && !window.confirm(`「${target.fileName}」有未保存的修改，确定关闭吗？`)) return;
+
+      setTabs((prev) => {
+        const idx = prev.findIndex((t) => t.id === id);
+        const next = prev.filter((t) => t.id !== id);
+        if (next.length === 0) {
+          const blank = makeTab('未命名.html', DEFAULT_HTML, null);
+          setActiveId(blank.id);
+          setPreviewMap((m) => ({ ...m, [blank.id]: DEFAULT_HTML }));
+          return [blank];
+        }
+        if (id === activeRef.current) {
+          const fallback = next[Math.max(0, idx - 1)] ?? next[0];
+          setActiveId(fallback.id);
+          setPreviewMap((m) => ({ ...m, [fallback.id]: fallback.source }));
+        }
+        return next;
+      });
+    },
+    [],
+  );
 
   // ---- 工作区：左侧边栏的 HTML 文件列表 ----
 
@@ -206,25 +263,25 @@ export function useEditor(): IUseEditorReturn {
       if (!workspaceDir) return;
       try {
         const result = await readWorkspaceFile(workspaceDir, name);
-        if (result) applyOpenedFile(result.doc.source, result.doc.fileName, result.handle);
+        if (result) upsertOpened(result.doc.source, result.doc.fileName, result.handle);
         else toast.error(`无法打开 ${name}`);
       } catch {
         toast.error(`无法打开 ${name}`);
       }
     },
-    [workspaceDir, applyOpenedFile],
+    [workspaceDir, upsertOpened],
   );
 
   const applyFile = useCallback(
     async (file: File) => {
       try {
         const source = await readFileAsText(file);
-        applyOpenedFile(source, file.name, null);
+        upsertOpened(source, file.name, null);
       } catch {
         toast.error('读取文件失败，请重试');
       }
     },
-    [applyOpenedFile],
+    [upsertOpened],
   );
 
   const handleOpen = useCallback(async () => {
@@ -234,39 +291,49 @@ export function useEditor(): IUseEditorReturn {
     }
     try {
       const result = await openHtmlFile();
-      if (result) applyOpenedFile(result.doc.source, result.doc.fileName, result.handle);
+      if (result) upsertOpened(result.doc.source, result.doc.fileName, result.handle);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       toast.error('打开文件失败，请重试');
     }
-  }, [applyOpenedFile, applyFile]);
+  }, [upsertOpened, applyFile]);
+
+  const persistDraft = useCallback((list: IEditorTab[]) => {
+    try {
+      const payload = { tabs: list.map((t) => ({ fileName: t.fileName, source: t.source })) };
+      localStorage.setItem(DRAFT_KEY, JSON.stringify(payload));
+      localStorage.removeItem(LEGACY_DRAFT_KEY);
+    } catch {
+      /* 隐私模式等场景静默降级 */
+    }
+  }, []);
 
   const handleSaveAs = useCallback(async () => {
-    const current = sourceRef.current;
+    const id = activeRef.current;
+    const prev = tabsRef.current.find((t) => t.id === id);
+    if (!prev) return;
     try {
-      const handle = await saveAsHtml(current, doc.fileName);
+      const handle = await saveAsHtml(prev.source, prev.fileName);
       if (handle) {
-        setFileHandle(handle);
-        setDoc((prev) => ({ ...prev, fileName: handle.name }));
-        savedSourceRef.current = current;
-        setDirty(false);
-        draftStore.clear();
+        patchTab(id, { handle, fileName: handle.name, savedSource: prev.source, dirty: false });
+        persistDraft(tabsRef.current);
         toast.success('已保存');
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       toast.error(`保存失败：${String(err)}`);
     }
-  }, [doc.fileName]);
+  }, [patchTab, persistDraft]);
 
   const handleSave = useCallback(async () => {
-    const current = sourceRef.current;
-    if (fileHandle) {
+    const id = activeRef.current;
+    const prev = tabsRef.current.find((t) => t.id === id);
+    if (!prev) return;
+    if (prev.handle) {
       try {
-        await saveWithHandle(fileHandle, current);
-        savedSourceRef.current = current;
-        setDirty(false);
-        draftStore.clear();
+        await saveWithHandle(prev.handle, prev.source);
+        patchTab(id, { savedSource: prev.source, dirty: false });
+        persistDraft(tabsRef.current);
         toast.success('已保存');
       } catch (err) {
         toast.error(`保存失败：${String(err)}`);
@@ -274,15 +341,14 @@ export function useEditor(): IUseEditorReturn {
       return;
     }
     await handleSaveAs();
-  }, [fileHandle, handleSaveAs]);
+  }, [patchTab, persistDraft, handleSaveAs]);
 
   // 有未保存修改时写入草稿（防抖批量落盘，避免高频按键下反复序列化大字符串卡顿）
   useEffect(() => {
-    if (!dirty) return;
     window.clearTimeout(draftTimerRef.current);
-    draftTimerRef.current = window.setTimeout(() => draftStore.set(doc), 500);
+    draftTimerRef.current = window.setTimeout(() => persistDraft(tabs), 500);
     return () => window.clearTimeout(draftTimerRef.current);
-  }, [dirty, doc]);
+  }, [tabs, persistDraft]);
 
   // Ctrl/Cmd+S 保存，Ctrl/Cmd+Shift+S 另存为
   const saveRef = useRef<() => void>(() => undefined);
@@ -302,10 +368,18 @@ export function useEditor(): IUseEditorReturn {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  const renderedHtml = activeTab ? (previewMap[activeTab.id] ?? activeTab.source) : DEFAULT_HTML;
+  const previewStale = activeTab ? Boolean(staleMap[activeTab.id]) : false;
+  const stats = activeTab ? countStats(activeTab.source) : { chars: 0, lines: 0 };
+
   return {
-    doc,
+    tabs,
+    activeTab,
+    activeId,
+    setActiveId: activateTab,
+    closeTab,
     setSource,
-    dirty,
+    dirty: activeTab?.dirty ?? false,
     isEditing,
     setEditing,
     previewStale,
@@ -318,7 +392,7 @@ export function useEditor(): IUseEditorReturn {
     handleOpen,
     handleSave,
     handleSaveAs,
-    stats: countStats(doc.source),
+    stats,
     workspaceDir,
     workspaceFiles,
     handlePickWorkspace,

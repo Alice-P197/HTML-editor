@@ -21,7 +21,7 @@ let splashWindow = null;
 let mainReady = false;
 let splashStart = 0;
 // 启动画面最短展示时长，避免本地加载过快导致 splash 一闪而过
-const MIN_SPLASH_MS = 1400;
+const MIN_SPLASH_MS = 600;
 
 /** 关闭启动画面（幂等） */
 function closeSplash() {
